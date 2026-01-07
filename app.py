@@ -26,6 +26,18 @@ st.markdown("""
         border-radius: 10px;
         box-shadow: 2px 2px 10px rgba(0,0,0,0.05);
     }
+    .insight-box {
+        padding: 15px;
+        border-left: 5px solid #FF4B4B;
+        background-color: #f9f9f9;
+        border-radius: 5px;
+        margin-bottom: 10px;
+    }
+    .insight-header {
+        font-weight: bold;
+        color: #31333F;
+        font-size: 1.1em;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,21 +74,13 @@ def compute_flow_liquidity_metrics(df, flow_source_col='Volume', window=20):
     
     # B. Flow Proxy (ΔQ)
     # Logic: Signed Volume. If Close > Open, we assume 'Buying Pressure', else 'Selling Pressure'.
-    # Note: A more advanced version would use tick data, but OHLCv allows this heuristic.
     df['Direction'] = np.where(df['Close'] >= df['Open'], 1, -1)
     
     # Normalized Flow: We use Volume * Direction. 
-    # To make it comparable across time, we can normalize by a moving average of volume if needed,
-    # but raw Signed Volume preserves the magnitude of "surges".
     df['Flow_Raw'] = df[flow_source_col] * df['Direction']
     
     # C. Liquidity / Impact Parameter (λ)
-    # We use the Amihud Illiquidity Ratio proxy: |Return| / (Price * Volume)
-    # However, to get a cleaner "Impact Slope", we can use: |Price Change| / Volume
-    # λ = How much price moves ($) per unit of volume.
-    # We smooth this with a rolling window to estimate the current "Regime".
-    
-    # Avoid division by zero
+    # We use the Amihud Illiquidity Ratio proxy: |Price Change| / Volume
     safe_volume = df[flow_source_col].replace(0, np.nan)
     
     # Raw Amihud (Daily Impact)
@@ -89,39 +93,96 @@ def compute_flow_liquidity_metrics(df, flow_source_col='Volume', window=20):
     
     # D. Flow-Implied Price Move (ΔS_hat)
     # Model: ΔS_hat = λ_t * Flow_t
-    # We use the rolling Lambda to estimate what the price move "should" have been
-    # given the volume flow and the current liquidity regime.
     df['Implied_Price_Change'] = df['Lambda_Liquidity'] * df['Flow_Raw']
     
     # Reconstruct Implied Price Level (Indexed to start of window)
-    # We start the index at the first valid data point
     valid_idx = df['Lambda_Liquidity'].first_valid_index()
     
     if valid_idx:
         start_price = df.loc[valid_idx, 'Close']
-        # Cumulative sum of implied changes added to the starting price
         df['Implied_Price'] = start_price + df['Implied_Price_Change'].cumsum()
-        
-        # Align the actual price for the chart comparison (starting from same point)
         df['Actual_Price_Indexed'] = df['Close']
     else:
         df['Implied_Price'] = np.nan
         df['Actual_Price_Indexed'] = np.nan
 
     # E. Divergence (Residual)
-    # Positive = Price is higher than flows would justify (Premium/Markup)
-    # Negative = Price is lower than flows would justify (Discount/Markdown)
     df['Divergence'] = df['Close'] - df['Implied_Price']
 
     return df.dropna()
 
-# --- 3. Visualization Helpers ---
+# --- 3. Insights Generation (New Feature) ---
+def generate_insights(df):
+    """
+    Generates text explanations based on data statistics.
+    """
+    insights = []
+    
+    last_row = df.iloc[-1]
+    avg_lambda = df['Lambda_Liquidity'].mean()
+    curr_lambda = last_row['Lambda_Liquidity']
+    
+    # 1. Divergence Analysis
+    div_val = last_row['Divergence']
+    close_price = last_row['Close']
+    div_pct = (div_val / close_price) * 100
+    
+    if div_pct > 2.0:
+        insights.append({
+            "title": "⚠️ Significant Premium (Overbought)",
+            "text": f"The actual price is **{div_pct:.1f}% higher** than what the flow model predicts. This suggests price is rising without significant volume support, often a sign of exhaustion or speculative markup."
+        })
+    elif div_pct < -2.0:
+        insights.append({
+            "title": "⚠️ Significant Discount (Oversold)",
+            "text": f"The actual price is **{abs(div_pct):.1f}% lower** than the flow model predicts. Price has dropped aggressively despite volume flows that would suggest a higher value, potentially indicating a capitulation bottom."
+        })
+    else:
+        insights.append({
+            "title": "✅ Fair Value Alignment",
+            "text": "The price is tracking closely with the volume flow model, indicating the current trend is well-supported by actual market activity."
+        })
+
+    # 2. Liquidity Regime Analysis
+    lambda_ratio = curr_lambda / avg_lambda
+    if lambda_ratio > 1.2:
+        insights.append({
+            "title": "🌊 Fragile Liquidity Environment",
+            "text": f"Current liquidity impact ($\lambda$) is **{lambda_ratio:.1f}x higher** than average. The order book is thin; expect higher volatility and slippage. Small orders are moving price significantly."
+        })
+    elif lambda_ratio < 0.8:
+        insights.append({
+            "title": "🛡️ Deep Liquidity Environment",
+            "text": "Current liquidity impact is lower than average. The market is absorbing volume well. It will take significant buying/selling pressure to create large price moves."
+        })
+    else:
+        insights.append({
+            "title": "⚖️ Normal Liquidity Conditions",
+            "text": "Market depth is near historical averages. Volatility is expected to be standard."
+        })
+
+    # 3. Flow Trend
+    recent_flows = df['Flow_Raw'].tail(5).sum()
+    if recent_flows > 0:
+        insights.append({
+            "title": "📈 Net Buying Pressure",
+            "text": "Over the last 5 periods, cumulative volume flow has been positive, supporting bullish price action."
+        })
+    else:
+        insights.append({
+            "title": "📉 Net Selling Pressure",
+            "text": "Over the last 5 periods, cumulative volume flow has been negative, exerting downward pressure on price."
+        })
+
+    return insights
+
+# --- 4. Visualization Helpers ---
 def plot_charts(df, ticker):
     # Create Subplots: Main Price, Flow, Liquidity
     fig = make_subplots(
         rows=3, cols=1, 
         shared_xaxes=True, 
-        vertical_spacing=0.05,
+        vertical_spacing=0.08,
         row_heights=[0.5, 0.25, 0.25],
         subplot_titles=(
             f"Price Action: Actual vs. Flow-Implied ({ticker})", 
@@ -143,15 +204,17 @@ def plot_charts(df, ticker):
         line=dict(color='purple', width=2, dash='dot')
     ), row=1, col=1)
     
-    # Highlight Divergence Zones
-    # We can fill area between the two lines
-    # Usually requires split traces for different colors, simplifying here:
-    # fig.add_trace(go.Scatter(
-    #    x=df.index, y=df['Implied_Price'], fill='tonexty', fillcolor='rgba(128,0,128,0.1)', line=dict(width=0), showlegend=False
-    # ), row=1, col=1)
+    # Highlight Divergence Zones (Fill)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df['Implied_Price'],
+        fill='tonexty', # Fills to the trace before it (Actual Price)
+        fillcolor='rgba(128,0,128,0.05)',
+        line=dict(width=0),
+        showlegend=False,
+        hoverinfo='skip'
+    ), row=1, col=1)
 
     # --- Row 2: Flow Pressure ---
-    # Color bars based on direction
     colors = ['#00cc96' if v > 0 else '#EF553B' for v in df['Flow_Raw']]
     fig.add_trace(go.Bar(
         x=df.index, y=df['Flow_Raw'],
@@ -169,15 +232,15 @@ def plot_charts(df, ticker):
     ), row=3, col=1)
 
     # Annotations for Liquidity
-    # Add a horizontal line for average liquidity
     avg_lambda = df['Lambda_Liquidity'].mean()
     fig.add_hline(y=avg_lambda, line_dash="dash", line_color="gray", annotation_text="Avg Fragility", row=3, col=1)
 
     fig.update_layout(
-        height=800, 
+        height=850, 
         hovermode="x unified", 
         template="plotly_white",
-        margin=dict(l=20, r=20, t=60, b=20)
+        margin=dict(l=20, r=20, t=60, b=20),
+        legend=dict(orientation="h", y=1.02, xanchor="right", x=1)
     )
     
     return fig
@@ -187,7 +250,6 @@ def main():
     # --- Sidebar Controls ---
     st.sidebar.title("⚙️ Configuration")
     
-    # Data Selection
     asset_option = st.sidebar.selectbox(
         "Select Asset", 
         options=["GC=F (Gold Futures)", "GLD (SPDR Gold Shares)", "XAUUSD=X (Spot Gold)"],
@@ -200,24 +262,22 @@ def main():
     }
     ticker = ticker_map[asset_option]
 
-    # Timeframe
     period = st.sidebar.selectbox("Data Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
     interval = st.sidebar.selectbox("Interval", ["1d", "1h", "90m"], index=0)
 
-    # Model Parameters
     st.sidebar.markdown("### 🧮 Model Parameters")
     window = st.sidebar.slider(
         "Rolling Window (Days/Bars)", 
         min_value=5, max_value=50, value=20, 
-        help="Window size to estimate the Liquidity Parameter (λ). A smaller window makes the model more sensitive to recent volatility."
+        help="Window size to estimate the Liquidity Parameter (λ)."
     )
     
     st.sidebar.info(
         """
         **How to read this:**
-        1. **Price vs Implied:** When 'Actual' deviates from 'Implied', price is moving without volume support (or against it).
+        1. **Price vs Implied:** When 'Actual' deviates from 'Implied', price is moving without volume support.
         2. **Flow:** Green bars = Net Buying Pressure, Red = Net Selling.
-        3. **Liquidity (λ):** Higher values = **Fragile**. Price moves easily on low volume. Low values = **Deep**. Hard to move price.
+        3. **Liquidity (λ):** Higher values = **Fragile**. Price moves easily on low volume.
         """
     )
 
@@ -227,9 +287,7 @@ def main():
         f"""
         This dashboard deconstructs **{asset_option}** price movements into two components:
         1. **Flow ($\Delta Q$):** The pressure from buying/selling volume.
-        2. **Liquidity ($\lambda$):** The market's capacity to absorb that flow (Price Impact).
-        
-        $$ \text{{Implied Move}} \approx \text{{Flow}} \times \text{{Liquidity Parameter}} $$
+        2. **Liquidity ($\lambda$):** The market's capacity to absorb that flow.
         """
     )
 
@@ -245,51 +303,28 @@ def main():
     processed_df = compute_flow_liquidity_metrics(raw_df, flow_source_col='Volume', window=window)
 
     if processed_df.empty:
-        st.error("Not enough data to calculate metrics. Try increasing the period or decreasing the rolling window.")
+        st.error("Not enough data to calculate metrics.")
         return
 
     # --- Dashboard Layout ---
     
-    # 1. Summary Statistics
+    # 1. Summary Metrics
     last_row = processed_df.iloc[-1]
-    prev_row = processed_df.iloc[-2]
     
     col1, col2, col3, col4 = st.columns(4)
-    
     with col1:
-        st.metric(
-            "Current Price", 
-            f"${last_row['Close']:,.2f}",
-            f"{last_row['Return']:.2%}"
-        )
-    
+        st.metric("Current Price", f"${last_row['Close']:,.2f}", f"{last_row['Return']:.2%}")
     with col2:
         flow_delta = last_row['Flow_Raw']
-        st.metric(
-            "Net Flow Pressure", 
-            f"{flow_delta:,.0f} Vol", 
-            delta_color="normal" if flow_delta > 0 else "inverse"
-        )
-        
+        st.metric("Net Flow Pressure", f"{flow_delta:,.0f} Vol", delta_color="normal" if flow_delta > 0 else "inverse")
     with col3:
-        # Liquidity State
         curr_liq = last_row['Lambda_Liquidity']
         avg_liq = processed_df['Lambda_Liquidity'].mean()
         liq_status = "Fragile (High Impact)" if curr_liq > avg_liq else "Deep (Low Impact)"
-        st.metric(
-            "Liquidity Regime", 
-            liq_status,
-            f"λ: {curr_liq:.2e}"
-        )
-
+        st.metric("Liquidity Regime", liq_status, f"λ: {curr_liq:.2e}")
     with col4:
-        # Correlation
         corr = processed_df['Close'].corr(processed_df['Implied_Price'])
-        st.metric(
-            "Model Fit (Correlation)",
-            f"{corr:.2f}",
-            help="Correlation between Actual Price and Flow-Implied Price. High correlation means flows explain price well."
-        )
+        st.metric("Model Fit (Correlation)", f"{corr:.2f}")
 
     st.markdown("---")
 
@@ -297,16 +332,33 @@ def main():
     chart_fig = plot_charts(processed_df, ticker)
     st.plotly_chart(chart_fig, use_container_width=True)
 
-    # 3. Data Table (Expandable)
+    # 3. Automated Analysis Section (NEW)
+    st.subheader("📝 Automated Chart Analysis")
+    
+    # Generate insights based on data
+    insights = generate_insights(processed_df)
+    
+    # Display insights in columns for readability
+    icol1, icol2, icol3 = st.columns(3)
+    
+    # Map the three generated insights to columns
+    if len(insights) >= 3:
+        with icol1:
+            st.markdown(f"<div class='insight-box'><div class='insight-header'>{insights[0]['title']}</div><p>{insights[0]['text']}</p></div>", unsafe_allow_html=True)
+        with icol2:
+            st.markdown(f"<div class='insight-box'><div class='insight-header'>{insights[1]['title']}</div><p>{insights[1]['text']}</p></div>", unsafe_allow_html=True)
+        with icol3:
+            st.markdown(f"<div class='insight-box'><div class='insight-header'>{insights[2]['title']}</div><p>{insights[2]['text']}</p></div>", unsafe_allow_html=True)
+
+    # 4. Data Logic Expander
     with st.expander("🔍 View Detailed Data Logic"):
         st.markdown("""
         **Methodology:**
-        * **Flow Proxy ($\Delta Q$):** Calculated as `Volume * Direction`, where Direction is +1 if Close > Open, else -1.
-        * **Liquidity Parameter ($\lambda$):** Based on the **Amihud Illiquidity Ratio**. It measures the absolute price change per unit of volume over the rolling window.
-            * Formula: $\lambda_t = \text{Avg}(\frac{|\Delta Price|}{\text{Volume}})$ over $N$ periods.
-        * **Implied Price:** Constructed by applying the historical impact parameter ($\lambda$) to the current flows.
+        * **Flow Proxy ($\Delta Q$):** Calculated as `Volume * Direction`.
+        * **Liquidity Parameter ($\lambda$):** Based on the **Amihud Illiquidity Ratio**.
+        * **Implied Price:** Constructed by applying historical impact ($\lambda$) to current flows.
         """)
-        st.dataframe(processed_df[['Close', 'Volume', 'Flow_Raw', 'Lambda_Liquidity', 'Implied_Price', 'Divergence']].sort_index(ascending=False).head(50))
+        st.dataframe(processed_df.tail(50).sort_index(ascending=False))
 
 if __name__ == "__main__":
     main()
