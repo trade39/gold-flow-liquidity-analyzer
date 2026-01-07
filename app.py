@@ -12,31 +12,47 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- Custom CSS for aesthetic tweaks ---
+# --- Custom CSS for aesthetic tweaks (Updated for Dark Mode) ---
 st.markdown("""
 <style>
+    /* Using Streamlit theme variables for dark/light mode compatibility */
     .metric-card {
-        background-color: #f0f2f6;
+        background-color: var(--secondary-background-color);
         border-radius: 10px;
         padding: 20px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
+        border: 1px solid rgba(128, 128, 128, 0.1);
     }
     .stPlotlyChart {
-        background-color: #ffffff;
+        /* Keep charts on a slightly lighter background in dark mode for contrast */
+        background-color: var(--secondary-background-color);
         border-radius: 10px;
         box-shadow: 2px 2px 10px rgba(0,0,0,0.05);
+        border: 1px solid rgba(128, 128, 128, 0.1);
     }
     .insight-box {
         padding: 15px;
         border-left: 5px solid #FF4B4B;
-        background-color: #f9f9f9;
+        /* Use theme-aware background color */
+        background-color: var(--secondary-background-color);
         border-radius: 5px;
         margin-bottom: 10px;
+        /* Ensure text adapts to theme */
+        color: var(--text-color);
+        border: 1px solid rgba(128, 128, 128, 0.1);
     }
     .insight-header {
         font-weight: bold;
-        color: #31333F;
+        /* Use theme-aware text color */
+        color: var(--text-color);
         font-size: 1.1em;
+        margin-bottom: 8px;
+    }
+    /* Ensure paragraph text inside insights adapts */
+    .insight-box p {
+        color: var(--text-color);
+        opacity: 0.9; /* Slightly softer contrast for body text */
+        margin-bottom: 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -235,13 +251,19 @@ def plot_charts(df, ticker):
     avg_lambda = df['Lambda_Liquidity'].mean()
     fig.add_hline(y=avg_lambda, line_dash="dash", line_color="gray", annotation_text="Avg Fragility", row=3, col=1)
 
+    # Update layout for theme compatibility
     fig.update_layout(
         height=850, 
         hovermode="x unified", 
-        template="plotly_white",
+        # template="plotly_white", # Removed to allow Plotly to adapt to Streamlit theme automatically
         margin=dict(l=20, r=20, t=60, b=20),
-        legend=dict(orientation="h", y=1.02, xanchor="right", x=1)
+        legend=dict(orientation="h", y=1.02, xanchor="right", x=1),
+        plot_bgcolor='rgba(0,0,0,0)', # Transparent background for plots
+        paper_bgcolor='rgba(0,0,0,0)', # Transparent background for the whole figure
     )
+    # Ensure gridlines and text look okay in both modes if template is removed
+    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
+    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
     
     return fig
 
@@ -311,20 +333,29 @@ def main():
     # 1. Summary Metrics
     last_row = processed_df.iloc[-1]
     
+    # Use custom CSS class for metric cards
     col1, col2, col3, col4 = st.columns(4)
     with col1:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         st.metric("Current Price", f"${last_row['Close']:,.2f}", f"{last_row['Return']:.2%}")
+        st.markdown('</div>', unsafe_allow_html=True)
     with col2:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         flow_delta = last_row['Flow_Raw']
         st.metric("Net Flow Pressure", f"{flow_delta:,.0f} Vol", delta_color="normal" if flow_delta > 0 else "inverse")
+        st.markdown('</div>', unsafe_allow_html=True)
     with col3:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         curr_liq = last_row['Lambda_Liquidity']
         avg_liq = processed_df['Lambda_Liquidity'].mean()
         liq_status = "Fragile (High Impact)" if curr_liq > avg_liq else "Deep (Low Impact)"
         st.metric("Liquidity Regime", liq_status, f"λ: {curr_liq:.2e}")
+        st.markdown('</div>', unsafe_allow_html=True)
     with col4:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         corr = processed_df['Close'].corr(processed_df['Implied_Price'])
         st.metric("Model Fit (Correlation)", f"{corr:.2f}")
+        st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("---")
 
