@@ -123,7 +123,7 @@ def fetch_fred_data(api_key, start_date):
         return macro_df
         
     except Exception as e:
-        st.warning(f"Could not fetch FRED data. Check API Key. Error: {e}")
+        # Don't show error immediately, just return None so UI handles it gracefully
         return None
 
 # --- 2. Computation Engine ---
@@ -411,7 +411,7 @@ def plot_macro_charts(df, ticker):
     Plots Gold Price vs FRED Macro Data.
     """
     if 'Real_Yield_10Y' not in df.columns or df['Real_Yield_10Y'].isnull().all():
-        return go.Figure().add_annotation(text="Macro Data Not Available (Check API Key or Date Range)", showarrow=False)
+        return go.Figure().add_annotation(text="Macro Data Unavailable or Loading...", showarrow=False)
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
@@ -422,8 +422,6 @@ def plot_macro_charts(df, ticker):
     )
 
     # 2. Real Yields (Right Axis)
-    # We invert Real Yields because Gold usually moves opposite to yields.
-    # High Yields = Bad for Gold. Low Yields = Good.
     fig.add_trace(
         go.Scatter(
             x=df.index, 
@@ -435,8 +433,7 @@ def plot_macro_charts(df, ticker):
         secondary_y=True,
     )
     
-    # 3. Dollar Index (Right Axis - Optional or Separate, combining for now)
-    # If we want to show both, we might clutter, but let's add DXY as a faint line
+    # 3. Dollar Index
     if 'Dollar_Index' in df.columns:
          fig.add_trace(
             go.Scatter(
@@ -459,9 +456,6 @@ def plot_macro_charts(df, ticker):
         paper_bgcolor='rgba(0,0,0,0)',
     )
     
-    # Invert the Secondary Y Axis for Yields/DXY to show correlation better
-    # Standard correlation: Gold UP, Yields DOWN. 
-    # By inverting Yields axis, the lines should move together if correlation holds.
     fig.update_yaxes(title_text="Gold Price", secondary_y=False, showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
     fig.update_yaxes(title_text="Yields % / DXY", secondary_y=True, showgrid=False, autorange="reversed") 
 
@@ -494,9 +488,25 @@ def main():
         help="Window size to estimate the Liquidity Parameter (λ)."
     )
     
-    # FRED API Key Handling
-    # User puts key in secrets or environment variable
-    fred_api_key = st.secrets.get("FRED_API_KEY", None)
+    # --- FRED API Key Robust Handling ---
+    fred_api_key = None
+    
+    # 1. Try to get from Secrets
+    try:
+        if "FRED_API_KEY" in st.secrets:
+            fred_api_key = st.secrets["FRED_API_KEY"]
+            st.sidebar.success("✅ FRED API Key found in Secrets")
+    except FileNotFoundError:
+        pass # Local run without secrets.toml
+    
+    # 2. Fallback: Manual Entry if not in Secrets
+    if not fred_api_key:
+        st.sidebar.warning("⚠️ Secret 'FRED_API_KEY' not found.")
+        fred_api_key = st.sidebar.text_input(
+            "Enter FRED API Key Manually:", 
+            type="password",
+            help="Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html"
+        )
     
     st.sidebar.info(
         """
@@ -507,11 +517,6 @@ def main():
         """
     )
     
-    if fred_api_key:
-        st.sidebar.success("✅ FRED API Connected")
-    else:
-        st.sidebar.warning("⚠️ FRED API Key not found in secrets. Macro charts will be disabled.")
-
     # --- Main Content ---
     st.title("⚱️ Gold Flow × Liquidity × Macro")
     st.markdown(
@@ -534,7 +539,6 @@ def main():
     macro_df = None
     if fred_api_key:
         with st.spinner('Fetching Macro data (FRED)...'):
-            # Calculate start date from raw_df
             start_date = raw_df.index[0]
             macro_df = fetch_fred_data(fred_api_key, start_date)
 
@@ -568,7 +572,7 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
     with col4:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        # Show Real Yield if available, else Model Correlation
+        # Show Real Yield if available
         if 'Real_Yield_10Y' in processed_df.columns and not pd.isna(last_row['Real_Yield_10Y']):
              st.metric("10Y Real Yield", f"{last_row['Real_Yield_10Y']:.2f}%")
         else:
@@ -590,7 +594,7 @@ def main():
             macro_fig = plot_macro_charts(processed_df, ticker)
             st.plotly_chart(macro_fig, use_container_width=True)
         else:
-            st.info("Add FRED_API_KEY to secrets to unlock Macro analysis.")
+            st.info("Enter a valid FRED API Key in the sidebar to view Macro data.")
 
     # 3. Automated Analysis Section
     st.subheader("📝 Automated Chart Analysis")
