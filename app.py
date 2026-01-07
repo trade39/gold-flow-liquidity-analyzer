@@ -40,6 +40,16 @@ st.markdown("""
         /* Ensure text adapts to theme */
         color: var(--text-color);
         border: 1px solid rgba(128, 128, 128, 0.1);
+        height: 100%; /* accurate alignment */
+    }
+    .summary-box {
+        padding: 20px;
+        border-left: 5px solid #00cc96; /* Green accent for summary */
+        background-color: var(--secondary-background-color);
+        border-radius: 5px;
+        margin-bottom: 25px;
+        color: var(--text-color);
+        border: 1px solid rgba(128, 128, 128, 0.1);
     }
     .insight-header {
         font-weight: bold;
@@ -49,10 +59,11 @@ st.markdown("""
         margin-bottom: 8px;
     }
     /* Ensure paragraph text inside insights adapts */
-    .insight-box p {
+    .insight-box p, .summary-box p {
         color: var(--text-color);
         opacity: 0.9; /* Slightly softer contrast for body text */
         margin-bottom: 0;
+        line-height: 1.5;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -127,10 +138,10 @@ def compute_flow_liquidity_metrics(df, flow_source_col='Volume', window=20):
 
     return df.dropna()
 
-# --- 3. Insights Generation (New Feature) ---
+# --- 3. Insights Generation ---
 def generate_insights(df):
     """
-    Generates text explanations based on data statistics.
+    Generates structured text insights based on data statistics.
     """
     insights = []
     
@@ -191,6 +202,49 @@ def generate_insights(df):
         })
 
     return insights
+
+def generate_executive_summary(df):
+    """
+    Generates a cohesive executive summary paragraph.
+    """
+    last_row = df.iloc[-1]
+    
+    # Determine Trend
+    price_trend = "upward" if last_row['Close'] > df['Close'].iloc[-5] else "downward"
+    
+    # Determine Flow Context
+    recent_net_flow = df['Flow_Raw'].tail(5).sum()
+    flow_desc = "strong net buying" if recent_net_flow > 0 else "strong net selling"
+    
+    # Determine Liquidity Context
+    avg_lambda = df['Lambda_Liquidity'].mean()
+    curr_lambda = last_row['Lambda_Liquidity']
+    if curr_lambda > avg_lambda * 1.2:
+        liq_desc = "fragile liquidity conditions, meaning volatility is elevated"
+    elif curr_lambda < avg_lambda * 0.8:
+        liq_desc = "deep liquidity, meaning the market is absorbing orders efficiently"
+    else:
+        liq_desc = "stable liquidity conditions"
+
+    # Determine Divergence
+    div_val = last_row['Divergence']
+    close_price = last_row['Close']
+    div_pct = (div_val / close_price) * 100
+    
+    if div_pct > 2.0:
+        div_desc = "trading at a premium relative to flows, warning of potential exhaustion"
+    elif div_pct < -2.0:
+        div_desc = "trading at a discount relative to flows, suggesting a potential bounce"
+    else:
+        div_desc = "trading at fair value consistent with volume flows"
+
+    summary_text = (
+        f"**Market Executive Summary:** Gold is currently trending **{price_trend}** supported by **{flow_desc}**. "
+        f"The market is operating under **{liq_desc}**. "
+        f"Critically, the price is currently **{div_desc}**. "
+        "Traders should monitor the flow pressure gauge for reversals in this regime."
+    )
+    return summary_text
 
 # --- 4. Visualization Helpers ---
 def plot_charts(df, ticker):
@@ -363,9 +417,13 @@ def main():
     chart_fig = plot_charts(processed_df, ticker)
     st.plotly_chart(chart_fig, use_container_width=True)
 
-    # 3. Automated Analysis Section (NEW)
+    # 3. Automated Analysis Section
     st.subheader("📝 Automated Chart Analysis")
     
+    # Generate and display Executive Summary (New Feature)
+    summary_text = generate_executive_summary(processed_df)
+    st.markdown(f"<div class='summary-box'>{summary_text}</div>", unsafe_allow_html=True)
+
     # Generate insights based on data
     insights = generate_insights(processed_df)
     
