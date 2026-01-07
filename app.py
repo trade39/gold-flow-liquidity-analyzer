@@ -4,6 +4,8 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+# NEW IMPORT FOR FRED
+from fredapi import Fred
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -88,10 +90,46 @@ def fetch_market_data(ticker_symbol, period, interval):
         st.error(f"Error fetching data: {e}")
         return None
 
-# --- 2. Computation Engine ---
-def compute_flow_liquidity_metrics(df, flow_source_col='Volume', window=20):
+@st.cache_data
+def fetch_fred_data(api_key, start_date):
     """
-    Computes Returns, Flow Proxies, Liquidity Parameters, and Implied Moves.
+    Fetches Macroeconomic data from FRED API.
+    1. DFII10: 10-Year Real Interest Rate (Inflation Indexed)
+    2. DTWEXBGS: Trade Weighted U.S. Dollar Index (Broad)
+    """
+    if not api_key:
+        return None
+        
+    try:
+        fred = Fred(api_key=api_key)
+        
+        # FRED needs dates in string YYYY-MM-DD
+        start_str = start_date.strftime('%Y-%m-%d')
+        
+        # Fetch Data
+        real_yield = fred.get_series('DFII10', observation_start=start_str)
+        dxy = fred.get_series('DTWEXBGS', observation_start=start_str)
+        
+        # If Broad Dollar Index is empty/lagging, try standard DXY proxy (limited on FRED, using Broad as default)
+        # Note: DTWEXBGS is daily but sometimes lags. 
+        
+        macro_df = pd.DataFrame({
+            'Real_Yield_10Y': real_yield,
+            'Dollar_Index': dxy
+        })
+        
+        # Forward fill to handle weekends/holidays in macro data before merging
+        macro_df = macro_df.fillna(method='ffill')
+        return macro_df
+        
+    except Exception as e:
+        st.warning(f"Could not fetch FRED data. Check API Key. Error: {e}")
+        return None
+
+# --- 2. Computation Engine ---
+def compute_flow_liquidity_metrics(df, macro_df=None, flow_source_col='Volume', window=20):
+    """
+    Computes Returns, Flow Proxies, Liquidity Parameters, Implied Moves, and merges Macro Data.
     """
     df = df.copy()
     
@@ -114,15 +152,13 @@ def compute_flow_liquidity_metrics(df, flow_source_col='Volume', window=20):
     df['Amihud_Raw'] = df['Price_Change'].abs() / safe_volume
     
     # Smoothed Liquidity Parameter (λ_t)
-    # High λ = Fragile Liquidity (Price moves easily on low volume)
-    # Low λ = Deep Liquidity (Price absorbs volume well)
     df['Lambda_Liquidity'] = df['Amihud_Raw'].rolling(window=window).mean()
     
     # D. Flow-Implied Price Move (ΔS_hat)
     # Model: ΔS_hat = λ_t * Flow_t
     df['Implied_Price_Change'] = df['Lambda_Liquidity'] * df['Flow_Raw']
     
-    # Reconstruct Implied Price Level (Indexed to start of window)
+    # Reconstruct Implied Price Level
     valid_idx = df['Lambda_Liquidity'].first_valid_index()
     
     if valid_idx:
@@ -136,14 +172,26 @@ def compute_flow_liquidity_metrics(df, flow_source_col='Volume', window=20):
     # E. Divergence (Residual)
     df['Divergence'] = df['Close'] - df['Implied_Price']
     
-    # F. Statistical Analysis (Z-Scores) - NEW FEATURE
-    # Calculate Z-Score of Liquidity to find statistically significant fragility
-    lambda_mean = df['Lambda_Liquidity'].rolling(window=window*2).mean() # Longer window for baseline
+    # F. Statistical Analysis (Z-Scores)
+    lambda_mean = df['Lambda_Liquidity'].rolling(window=window*2).mean()
     lambda_std = df['Lambda_Liquidity'].rolling(window=window*2).std()
     df['Liquidity_Z'] = (df['Lambda_Liquidity'] - lambda_mean) / lambda_std
     
-    # Calculate Divergence Percentage for Signals
     df['Div_Pct'] = (df['Divergence'] / df['Close']) * 100
+
+    # G. Merge Macro Data (If available)
+    if macro_df is not None:
+        # Ensure timezone compatibility (remove tz from Yahoo if present to match FRED)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        
+        # Join: Left join on Yahoo dates
+        # We assume df (intraday/daily) is the master index.
+        # FRED data is daily. We forward fill the macro data for intraday bars.
+        df = df.join(macro_df, how='left')
+        
+        # Forward fill macro data for intraday gaps
+        df[['Real_Yield_10Y', 'Dollar_Index']] = df[['Real_Yield_10Y', 'Dollar_Index']].fillna(method='ffill')
 
     return df.dropna()
 
@@ -156,7 +204,7 @@ def generate_insights(df):
     
     last_row = df.iloc[-1]
     
-    # 1. Divergence Analysis (Updated logic)
+    # 1. Divergence Analysis
     div_pct = last_row['Div_Pct']
     
     if div_pct > 2.0:
@@ -175,7 +223,7 @@ def generate_insights(df):
             "text": "The price is tracking closely with the volume flow model, indicating the current trend is well-supported by actual market activity."
         })
 
-    # 2. Liquidity Regime Analysis (Updated with Z-Score)
+    # 2. Liquidity Regime Analysis
     liq_z = last_row['Liquidity_Z']
     
     if liq_z > 2.0:
@@ -222,7 +270,7 @@ def generate_executive_summary(df):
     recent_net_flow = df['Flow_Raw'].tail(5).sum()
     flow_desc = "strong net buying" if recent_net_flow > 0 else "strong net selling"
     
-    # Determine Liquidity Context (Using Z-Score)
+    # Determine Liquidity Context
     liq_z = last_row['Liquidity_Z']
     if liq_z > 1.5:
         liq_desc = "fragile liquidity conditions (High Impact)"
@@ -240,17 +288,26 @@ def generate_executive_summary(df):
         div_desc = "trading at a statistical discount (Potential Bottom)"
     else:
         div_desc = "trading at fair value consistent with volume flows"
+    
+    # Macro Add-on (If data exists)
+    macro_text = ""
+    if 'Real_Yield_10Y' in df.columns:
+        # Check simple 5 day change in Yields
+        yield_delta = df['Real_Yield_10Y'].diff(5).iloc[-1]
+        if not pd.isna(yield_delta):
+            yield_trend = "rising" if yield_delta > 0 else "falling"
+            macro_text = f" On the macro front, Real Yields are {yield_trend}, adding {'headwinds' if yield_trend == 'rising' else 'tailwinds'} to Gold."
 
     summary_text = (
         f"Market Executive Summary: Gold is currently trending {price_trend} supported by {flow_desc}. "
         f"The market is operating under {liq_desc}. "
-        f"Critically, the price is currently {div_desc}. "
+        f"Critically, the price is currently {div_desc}.{macro_text} "
         "Traders should monitor the signal markers on the chart for reversals."
     )
     return summary_text
 
 # --- 4. Visualization Helpers ---
-def plot_charts(df, ticker):
+def plot_micro_charts(df, ticker):
     # Create Subplots: Main Price, Flow, Liquidity
     fig = make_subplots(
         rows=3, cols=1, 
@@ -277,7 +334,6 @@ def plot_charts(df, ticker):
         line=dict(color='purple', width=2, dash='dot')
     ), row=1, col=1)
     
-    # Highlight Divergence Zones (Fill)
     fig.add_trace(go.Scatter(
         x=df.index, y=df['Implied_Price'],
         fill='tonexty',
@@ -287,8 +343,7 @@ def plot_charts(df, ticker):
         hoverinfo='skip'
     ), row=1, col=1)
 
-    # NEW: Signal Markers for Significant Divergence
-    # Bearish Divergence (Price >> Implied)
+    # Signal Markers
     bear_div = df[df['Div_Pct'] > 2.0]
     if not bear_div.empty:
         fig.add_trace(go.Scatter(
@@ -298,7 +353,6 @@ def plot_charts(df, ticker):
             marker=dict(symbol='triangle-down', size=10, color='red')
         ), row=1, col=1)
 
-    # Bullish Divergence (Price << Implied)
     bull_div = df[df['Div_Pct'] < -2.0]
     if not bull_div.empty:
         fig.add_trace(go.Scatter(
@@ -329,10 +383,7 @@ def plot_charts(df, ticker):
     avg_lambda = df['Lambda_Liquidity'].mean()
     std_lambda = df['Lambda_Liquidity'].std()
     
-    # Add Mean Line
     fig.add_hline(y=avg_lambda, line_dash="dash", line_color="gray", annotation_text="Avg", row=3, col=1)
-    
-    # NEW: Add Statistical Fragility Band (+2 Std Dev)
     fig.add_hline(
         y=avg_lambda + (2 * std_lambda), 
         line_dash="dot", 
@@ -342,7 +393,6 @@ def plot_charts(df, ticker):
         row=3, col=1
     )
 
-    # Update layout for theme compatibility
     fig.update_layout(
         height=850, 
         hovermode="x unified", 
@@ -354,6 +404,67 @@ def plot_charts(df, ticker):
     fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
     
+    return fig
+
+def plot_macro_charts(df, ticker):
+    """
+    Plots Gold Price vs FRED Macro Data.
+    """
+    if 'Real_Yield_10Y' not in df.columns or df['Real_Yield_10Y'].isnull().all():
+        return go.Figure().add_annotation(text="Macro Data Not Available (Check API Key or Date Range)", showarrow=False)
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # 1. Gold Price (Left Axis)
+    fig.add_trace(
+        go.Scatter(x=df.index, y=df['Close'], name=f"{ticker} Price", line=dict(color='gold', width=2)),
+        secondary_y=False,
+    )
+
+    # 2. Real Yields (Right Axis)
+    # We invert Real Yields because Gold usually moves opposite to yields.
+    # High Yields = Bad for Gold. Low Yields = Good.
+    fig.add_trace(
+        go.Scatter(
+            x=df.index, 
+            y=df['Real_Yield_10Y'], 
+            name="10Y Real Yield (Inv)", 
+            line=dict(color='#FF4B4B', width=2, dash='dash'),
+            opacity=0.7
+        ),
+        secondary_y=True,
+    )
+    
+    # 3. Dollar Index (Right Axis - Optional or Separate, combining for now)
+    # If we want to show both, we might clutter, but let's add DXY as a faint line
+    if 'Dollar_Index' in df.columns:
+         fig.add_trace(
+            go.Scatter(
+                x=df.index, 
+                y=df['Dollar_Index'], 
+                name="Dollar Index (DXY)", 
+                line=dict(color='green', width=1, dash='dot'),
+                opacity=0.5
+            ),
+            secondary_y=True,
+        )
+
+    fig.update_layout(
+        title="Macro Regime: Gold vs. Real Yields (Inverted) & DXY",
+        height=600,
+        hovermode="x unified",
+        margin=dict(l=20, r=20, t=60, b=20),
+        legend=dict(orientation="h", y=1.02, xanchor="right", x=1),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+    )
+    
+    # Invert the Secondary Y Axis for Yields/DXY to show correlation better
+    # Standard correlation: Gold UP, Yields DOWN. 
+    # By inverting Yields axis, the lines should move together if correlation holds.
+    fig.update_yaxes(title_text="Gold Price", secondary_y=False, showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
+    fig.update_yaxes(title_text="Yields % / DXY", secondary_y=True, showgrid=False, autorange="reversed") 
+
     return fig
 
 # --- Main Application Logic ---
@@ -383,6 +494,10 @@ def main():
         help="Window size to estimate the Liquidity Parameter (λ)."
     )
     
+    # FRED API Key Handling
+    # User puts key in secrets or environment variable
+    fred_api_key = st.secrets.get("FRED_API_KEY", None)
+    
     st.sidebar.info(
         """
         **How to read this:**
@@ -391,14 +506,19 @@ def main():
         3. **Liquidity:** If the blue line hits the **Red Dotted Line**, the market is Extremely Fragile.
         """
     )
+    
+    if fred_api_key:
+        st.sidebar.success("✅ FRED API Connected")
+    else:
+        st.sidebar.warning("⚠️ FRED API Key not found in secrets. Macro charts will be disabled.")
 
     # --- Main Content ---
-    st.title("⚱️ Gold Price Action: Flow × Liquidity Framework")
+    st.title("⚱️ Gold Flow × Liquidity × Macro")
     st.markdown(
         f"""
         This dashboard deconstructs **{asset_option}** price movements into two components:
-        1. **Flow ($\Delta Q$):** The pressure from buying/selling volume.
-        2. **Liquidity ($\lambda$):** The market's capacity to absorb that flow.
+        1. **Microstructure:** Flow Pressure & Liquidity Fragility.
+        2. **Macro Regime:** Real Yields & Dollar Strength.
         """
     )
 
@@ -409,9 +529,17 @@ def main():
     if raw_df is None:
         st.warning("No data found. Try a different ticker or timeframe.")
         return
+        
+    # Fetch Macro Data (if key exists)
+    macro_df = None
+    if fred_api_key:
+        with st.spinner('Fetching Macro data (FRED)...'):
+            # Calculate start date from raw_df
+            start_date = raw_df.index[0]
+            macro_df = fetch_fred_data(fred_api_key, start_date)
 
-    # Compute Metrics
-    processed_df = compute_flow_liquidity_metrics(raw_df, flow_source_col='Volume', window=window)
+    # Compute Metrics (Pass macro_df if available)
+    processed_df = compute_flow_liquidity_metrics(raw_df, macro_df=macro_df, flow_source_col='Volume', window=window)
 
     if processed_df.empty:
         st.error("Not enough data to calculate metrics.")
@@ -434,22 +562,35 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
     with col3:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        # Display Z-Score instead of raw Lambda for better context
         z_score = last_row['Liquidity_Z']
         liq_status = "Fragile (2σ)" if z_score > 2 else "Normal"
         st.metric("Liquidity Stress", liq_status, f"Z: {z_score:.2f}")
         st.markdown('</div>', unsafe_allow_html=True)
     with col4:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        corr = processed_df['Close'].corr(processed_df['Implied_Price'])
-        st.metric("Model Fit (Correlation)", f"{corr:.2f}")
+        # Show Real Yield if available, else Model Correlation
+        if 'Real_Yield_10Y' in processed_df.columns and not pd.isna(last_row['Real_Yield_10Y']):
+             st.metric("10Y Real Yield", f"{last_row['Real_Yield_10Y']:.2f}%")
+        else:
+            corr = processed_df['Close'].corr(processed_df['Implied_Price'])
+            st.metric("Model Fit (Correlation)", f"{corr:.2f}")
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("---")
 
-    # 2. Charts
-    chart_fig = plot_charts(processed_df, ticker)
-    st.plotly_chart(chart_fig, use_container_width=True)
+    # 2. Charts (Tabs)
+    tab_micro, tab_macro = st.tabs(["🔬 Microstructure (Flow & Liquidity)", "🌍 Macro (Yields & DXY)"])
+    
+    with tab_micro:
+        chart_fig = plot_micro_charts(processed_df, ticker)
+        st.plotly_chart(chart_fig, use_container_width=True)
+        
+    with tab_macro:
+        if fred_api_key:
+            macro_fig = plot_macro_charts(processed_df, ticker)
+            st.plotly_chart(macro_fig, use_container_width=True)
+        else:
+            st.info("Add FRED_API_KEY to secrets to unlock Macro analysis.")
 
     # 3. Automated Analysis Section
     st.subheader("📝 Automated Chart Analysis")
@@ -479,6 +620,7 @@ def main():
         * **Flow Proxy ($\Delta Q$):** Calculated as `Volume * Direction`.
         * **Liquidity Parameter ($\lambda$):** Based on the **Amihud Illiquidity Ratio**.
         * **Fragility (Z-Score):** Measures how many standard deviations current liquidity is from the mean.
+        * **Macro:** Real Yields (FRED: DFII10) and Dollar Index (FRED: DTWEXBGS).
         """)
         st.dataframe(processed_df.tail(50).sort_index(ascending=False))
 
