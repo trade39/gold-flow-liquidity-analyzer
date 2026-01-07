@@ -239,9 +239,9 @@ def generate_executive_summary(df):
         div_desc = "trading at fair value consistent with volume flows"
 
     summary_text = (
-        f"**Market Executive Summary:** Gold is currently trending **{price_trend}** supported by **{flow_desc}**. "
-        f"The market is operating under **{liq_desc}**. "
-        f"Critically, the price is currently **{div_desc}**. "
+        f"Market Executive Summary: Gold is currently trending {price_trend} supported by {flow_desc}. "
+        f"The market is operating under {liq_desc}. "
+        f"Critically, the price is currently {div_desc}. "
         "Traders should monitor the flow pressure gauge for reversals in this regime."
     )
     return summary_text
