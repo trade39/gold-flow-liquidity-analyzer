@@ -22,7 +22,6 @@ st.markdown("""
         padding: 20px;
         box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
         border: 1px solid rgba(128, 128, 128, 0.1);
-        text-align: center;
     }
     .stPlotlyChart {
         /* Keep charts on a slightly lighter background in dark mode for contrast */
@@ -138,31 +137,6 @@ def compute_flow_liquidity_metrics(df, flow_source_col='Volume', window=20):
     df['Divergence'] = df['Close'] - df['Implied_Price']
 
     return df.dropna()
-
-def determine_regime(df):
-    """
-    Determines the market regime based on Price Trend and Flow Direction.
-    """
-    last_row = df.iloc[-1]
-    
-    # Simple Trend: Close vs 20-period SMA
-    sma_20 = df['Close'].rolling(window=20).mean().iloc[-1]
-    price_trend = "Up" if last_row['Close'] > sma_20 else "Down"
-    
-    # Flow Trend: Sum of last 5 periods
-    recent_flow = df['Flow_Raw'].tail(5).sum()
-    flow_trend = "Positive" if recent_flow > 0 else "Negative"
-    
-    if price_trend == "Up" and flow_trend == "Positive":
-        return "🐂 Bullish (Supported)", "normal"
-    elif price_trend == "Down" and flow_trend == "Negative":
-        return "🐻 Bearish (Supported)", "inverse"
-    elif price_trend == "Up" and flow_trend == "Negative":
-        return "⚠️ Bearish Divergence (Price Up, Flow Down)", "off"
-    elif price_trend == "Down" and flow_trend == "Positive":
-        return "⚠️ Bullish Divergence (Price Down, Flow Up)", "off"
-    else:
-        return "⚖️ Neutral / Chop", "off"
 
 # --- 3. Insights Generation ---
 def generate_insights(df):
@@ -407,9 +381,6 @@ def main():
     if processed_df.empty:
         st.error("Not enough data to calculate metrics.")
         return
-    
-    # Determine Regime
-    regime_text, regime_delta_color = determine_regime(processed_df)
 
     # --- Dashboard Layout ---
     
@@ -417,30 +388,24 @@ def main():
     last_row = processed_df.iloc[-1]
     
     # Use custom CSS class for metric cards
-    # Now with 5 columns to fit the new Regime indicator
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         st.metric("Current Price", f"${last_row['Close']:,.2f}", f"{last_row['Return']:.2%}")
         st.markdown('</div>', unsafe_allow_html=True)
     with col2:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Market Regime", regime_text, delta_color="off")
-        st.markdown('</div>', unsafe_allow_html=True)
-    with col3:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         flow_delta = last_row['Flow_Raw']
         st.metric("Net Flow Pressure", f"{flow_delta:,.0f} Vol", delta_color="normal" if flow_delta > 0 else "inverse")
         st.markdown('</div>', unsafe_allow_html=True)
-    with col4:
+    with col3:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         curr_liq = last_row['Lambda_Liquidity']
         avg_liq = processed_df['Lambda_Liquidity'].mean()
-        liq_status = "Fragile" if curr_liq > avg_liq else "Deep"
+        liq_status = "Fragile (High Impact)" if curr_liq > avg_liq else "Deep (Low Impact)"
         st.metric("Liquidity Regime", liq_status, f"λ: {curr_liq:.2e}")
         st.markdown('</div>', unsafe_allow_html=True)
-    with col5:
+    with col4:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         corr = processed_df['Close'].corr(processed_df['Implied_Price'])
         st.metric("Model Fit (Correlation)", f"{corr:.2f}")
