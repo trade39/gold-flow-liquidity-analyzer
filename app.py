@@ -135,6 +135,15 @@ def compute_flow_liquidity_metrics(df, flow_source_col='Volume', window=20):
 
     # E. Divergence (Residual)
     df['Divergence'] = df['Close'] - df['Implied_Price']
+    
+    # F. Statistical Analysis (Z-Scores) - NEW FEATURE
+    # Calculate Z-Score of Liquidity to find statistically significant fragility
+    lambda_mean = df['Lambda_Liquidity'].rolling(window=window*2).mean() # Longer window for baseline
+    lambda_std = df['Lambda_Liquidity'].rolling(window=window*2).std()
+    df['Liquidity_Z'] = (df['Lambda_Liquidity'] - lambda_mean) / lambda_std
+    
+    # Calculate Divergence Percentage for Signals
+    df['Div_Pct'] = (df['Divergence'] / df['Close']) * 100
 
     return df.dropna()
 
@@ -146,23 +155,19 @@ def generate_insights(df):
     insights = []
     
     last_row = df.iloc[-1]
-    avg_lambda = df['Lambda_Liquidity'].mean()
-    curr_lambda = last_row['Lambda_Liquidity']
     
-    # 1. Divergence Analysis
-    div_val = last_row['Divergence']
-    close_price = last_row['Close']
-    div_pct = (div_val / close_price) * 100
+    # 1. Divergence Analysis (Updated logic)
+    div_pct = last_row['Div_Pct']
     
     if div_pct > 2.0:
         insights.append({
             "title": "⚠️ Significant Premium (Overbought)",
-            "text": f"The actual price is **{div_pct:.1f}% higher** than what the flow model predicts. This suggests price is rising without significant volume support, often a sign of exhaustion or speculative markup."
+            "text": f"The actual price is **{div_pct:.1f}% higher** than model predictions. This is a statistical 'Premium' zone, often preceding mean reversion."
         })
     elif div_pct < -2.0:
         insights.append({
             "title": "⚠️ Significant Discount (Oversold)",
-            "text": f"The actual price is **{abs(div_pct):.1f}% lower** than the flow model predicts. Price has dropped aggressively despite volume flows that would suggest a higher value, potentially indicating a capitulation bottom."
+            "text": f"The actual price is **{abs(div_pct):.1f}% lower** than model predictions. This is a statistical 'Discount' zone, potentially indicating a value buying opportunity."
         })
     else:
         insights.append({
@@ -170,22 +175,23 @@ def generate_insights(df):
             "text": "The price is tracking closely with the volume flow model, indicating the current trend is well-supported by actual market activity."
         })
 
-    # 2. Liquidity Regime Analysis
-    lambda_ratio = curr_lambda / avg_lambda
-    if lambda_ratio > 1.2:
+    # 2. Liquidity Regime Analysis (Updated with Z-Score)
+    liq_z = last_row['Liquidity_Z']
+    
+    if liq_z > 2.0:
         insights.append({
-            "title": "🌊 Fragile Liquidity Environment",
-            "text": f"Current liquidity impact ($\lambda$) is **{lambda_ratio:.1f}x higher** than average. The order book is thin; expect higher volatility and slippage. Small orders are moving price significantly."
+            "title": "🌊 Critical Fragility (3-Sigma)",
+            "text": f"Liquidity is extremely thin (Z-Score: {liq_z:.1f}). Price impact is statistically abnormal. Expect slippage and sharp volatility."
         })
-    elif lambda_ratio < 0.8:
+    elif liq_z < -1.0:
         insights.append({
-            "title": "🛡️ Deep Liquidity Environment",
-            "text": "Current liquidity impact is lower than average. The market is absorbing volume well. It will take significant buying/selling pressure to create large price moves."
+            "title": "🛡️ Deep Liquidity",
+            "text": "The market is absorbing volume exceptionally well. Large orders are required to move price significantly in this regime."
         })
     else:
         insights.append({
             "title": "⚖️ Normal Liquidity Conditions",
-            "text": "Market depth is near historical averages. Volatility is expected to be standard."
+            "text": "Market depth is within standard statistical deviations. Volatility is expected to be normal."
         })
 
     # 3. Flow Trend
@@ -216,25 +222,22 @@ def generate_executive_summary(df):
     recent_net_flow = df['Flow_Raw'].tail(5).sum()
     flow_desc = "strong net buying" if recent_net_flow > 0 else "strong net selling"
     
-    # Determine Liquidity Context
-    avg_lambda = df['Lambda_Liquidity'].mean()
-    curr_lambda = last_row['Lambda_Liquidity']
-    if curr_lambda > avg_lambda * 1.2:
-        liq_desc = "fragile liquidity conditions, meaning volatility is elevated"
-    elif curr_lambda < avg_lambda * 0.8:
-        liq_desc = "deep liquidity, meaning the market is absorbing orders efficiently"
+    # Determine Liquidity Context (Using Z-Score)
+    liq_z = last_row['Liquidity_Z']
+    if liq_z > 1.5:
+        liq_desc = "fragile liquidity conditions (High Impact)"
+    elif liq_z < -0.5:
+        liq_desc = "deep liquidity (Low Impact)"
     else:
         liq_desc = "stable liquidity conditions"
 
     # Determine Divergence
-    div_val = last_row['Divergence']
-    close_price = last_row['Close']
-    div_pct = (div_val / close_price) * 100
+    div_pct = last_row['Div_Pct']
     
     if div_pct > 2.0:
-        div_desc = "trading at a premium relative to flows, warning of potential exhaustion"
+        div_desc = "trading at a statistical premium (Potential Top)"
     elif div_pct < -2.0:
-        div_desc = "trading at a discount relative to flows, suggesting a potential bounce"
+        div_desc = "trading at a statistical discount (Potential Bottom)"
     else:
         div_desc = "trading at fair value consistent with volume flows"
 
@@ -242,7 +245,7 @@ def generate_executive_summary(df):
         f"Market Executive Summary: Gold is currently trending {price_trend} supported by {flow_desc}. "
         f"The market is operating under {liq_desc}. "
         f"Critically, the price is currently {div_desc}. "
-        "Traders should monitor the flow pressure gauge for reversals in this regime."
+        "Traders should monitor the signal markers on the chart for reversals."
     )
     return summary_text
 
@@ -257,7 +260,7 @@ def plot_charts(df, ticker):
         subplot_titles=(
             f"Price Action: Actual vs. Flow-Implied ({ticker})", 
             "Net Flow Pressure (Signed Volume)", 
-            "Liquidity Regime (λ - Price Impact Parameter)"
+            "Liquidity Regime (Z-Score & Impact)"
         )
     )
 
@@ -277,12 +280,33 @@ def plot_charts(df, ticker):
     # Highlight Divergence Zones (Fill)
     fig.add_trace(go.Scatter(
         x=df.index, y=df['Implied_Price'],
-        fill='tonexty', # Fills to the trace before it (Actual Price)
+        fill='tonexty',
         fillcolor='rgba(128,0,128,0.05)',
         line=dict(width=0),
         showlegend=False,
         hoverinfo='skip'
     ), row=1, col=1)
+
+    # NEW: Signal Markers for Significant Divergence
+    # Bearish Divergence (Price >> Implied)
+    bear_div = df[df['Div_Pct'] > 2.0]
+    if not bear_div.empty:
+        fig.add_trace(go.Scatter(
+            x=bear_div.index, y=bear_div['Close'] * 1.005,
+            mode='markers',
+            name='Premium (Bearish)',
+            marker=dict(symbol='triangle-down', size=10, color='red')
+        ), row=1, col=1)
+
+    # Bullish Divergence (Price << Implied)
+    bull_div = df[df['Div_Pct'] < -2.0]
+    if not bull_div.empty:
+        fig.add_trace(go.Scatter(
+            x=bull_div.index, y=bull_div['Close'] * 0.995,
+            mode='markers',
+            name='Discount (Bullish)',
+            marker=dict(symbol='triangle-up', size=10, color='#00cc96')
+        ), row=1, col=1)
 
     # --- Row 2: Flow Pressure ---
     colors = ['#00cc96' if v > 0 else '#EF553B' for v in df['Flow_Raw']]
@@ -303,19 +327,30 @@ def plot_charts(df, ticker):
 
     # Annotations for Liquidity
     avg_lambda = df['Lambda_Liquidity'].mean()
-    fig.add_hline(y=avg_lambda, line_dash="dash", line_color="gray", annotation_text="Avg Fragility", row=3, col=1)
+    std_lambda = df['Lambda_Liquidity'].std()
+    
+    # Add Mean Line
+    fig.add_hline(y=avg_lambda, line_dash="dash", line_color="gray", annotation_text="Avg", row=3, col=1)
+    
+    # NEW: Add Statistical Fragility Band (+2 Std Dev)
+    fig.add_hline(
+        y=avg_lambda + (2 * std_lambda), 
+        line_dash="dot", 
+        line_color="#FF4B4B", 
+        annotation_text="Extreme Fragility (2σ)", 
+        annotation_position="top left",
+        row=3, col=1
+    )
 
     # Update layout for theme compatibility
     fig.update_layout(
         height=850, 
         hovermode="x unified", 
-        # template="plotly_white", # Removed to allow Plotly to adapt to Streamlit theme automatically
         margin=dict(l=20, r=20, t=60, b=20),
         legend=dict(orientation="h", y=1.02, xanchor="right", x=1),
-        plot_bgcolor='rgba(0,0,0,0)', # Transparent background for plots
-        paper_bgcolor='rgba(0,0,0,0)', # Transparent background for the whole figure
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
     )
-    # Ensure gridlines and text look okay in both modes if template is removed
     fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
     
@@ -351,9 +386,9 @@ def main():
     st.sidebar.info(
         """
         **How to read this:**
-        1. **Price vs Implied:** When 'Actual' deviates from 'Implied', price is moving without volume support.
-        2. **Flow:** Green bars = Net Buying Pressure, Red = Net Selling.
-        3. **Liquidity (λ):** Higher values = **Fragile**. Price moves easily on low volume.
+        1. **Price vs Implied:** Look for **Red Triangles** (Sell Signals) or **Green Triangles** (Buy Signals).
+        2. **Flow:** Green bars = Net Buying Pressure.
+        3. **Liquidity:** If the blue line hits the **Red Dotted Line**, the market is Extremely Fragile.
         """
     )
 
@@ -387,7 +422,6 @@ def main():
     # 1. Summary Metrics
     last_row = processed_df.iloc[-1]
     
-    # Use custom CSS class for metric cards
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
@@ -400,10 +434,10 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
     with col3:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        curr_liq = last_row['Lambda_Liquidity']
-        avg_liq = processed_df['Lambda_Liquidity'].mean()
-        liq_status = "Fragile (High Impact)" if curr_liq > avg_liq else "Deep (Low Impact)"
-        st.metric("Liquidity Regime", liq_status, f"λ: {curr_liq:.2e}")
+        # Display Z-Score instead of raw Lambda for better context
+        z_score = last_row['Liquidity_Z']
+        liq_status = "Fragile (2σ)" if z_score > 2 else "Normal"
+        st.metric("Liquidity Stress", liq_status, f"Z: {z_score:.2f}")
         st.markdown('</div>', unsafe_allow_html=True)
     with col4:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
@@ -420,17 +454,16 @@ def main():
     # 3. Automated Analysis Section
     st.subheader("📝 Automated Chart Analysis")
     
-    # Generate and display Executive Summary (New Feature)
+    # Generate and display Executive Summary
     summary_text = generate_executive_summary(processed_df)
     st.markdown(f"<div class='summary-box'>{summary_text}</div>", unsafe_allow_html=True)
 
     # Generate insights based on data
     insights = generate_insights(processed_df)
     
-    # Display insights in columns for readability
+    # Display insights in columns
     icol1, icol2, icol3 = st.columns(3)
     
-    # Map the three generated insights to columns
     if len(insights) >= 3:
         with icol1:
             st.markdown(f"<div class='insight-box'><div class='insight-header'>{insights[0]['title']}</div><p>{insights[0]['text']}</p></div>", unsafe_allow_html=True)
@@ -445,7 +478,7 @@ def main():
         **Methodology:**
         * **Flow Proxy ($\Delta Q$):** Calculated as `Volume * Direction`.
         * **Liquidity Parameter ($\lambda$):** Based on the **Amihud Illiquidity Ratio**.
-        * **Implied Price:** Constructed by applying historical impact ($\lambda$) to current flows.
+        * **Fragility (Z-Score):** Measures how many standard deviations current liquidity is from the mean.
         """)
         st.dataframe(processed_df.tail(50).sort_index(ascending=False))
 
